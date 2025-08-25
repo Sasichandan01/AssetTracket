@@ -1,0 +1,758 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Parameters:
+  pProjectName:
+    Type: String
+    Default: AssetTracker
+
+  SwaggerS3Bucket:
+    Type: String
+    Default: assettracker-s3-bucket
+    Description: S3 bucket containing Swagger file
+
+  SwaggerS3Key:
+    Type: String
+    Default: api_swagger.yaml
+    Description: Swagger file name in S3
+
+  StageName:
+    Type: String
+    Default: prod
+
+Resources:
+
+  WebACLAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn: ApiDeployment
+    Properties:
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${ApiGateway}/stages/${StageName}
+
+      WebACLArn: !ImportValue AssetTrackerWebACL-cfn
+
+  SSMUpdateLambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaSSMUpdateRole-cfn
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+
+      Policies:
+        - PolicyName: LambdaSSMUpdatePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                Resource:
+                  - !Sub
+                    - arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMAgentIdName}
+                    - SSMAgentIdName: !ImportValue SSMAgentIdName-cfn
+                  - !Sub
+                    - arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMUserPoolIdName}
+                    - SSMUserPoolIdName: !ImportValue SSMUserPoolIdName-cfn
+                  - !Sub 
+                    - arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMAgentAliasIdName}
+                    - SSMAgentAliasIdName: !ImportValue SSMAgentAliasIdName-cfn
+                  - !Sub
+                    - arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMApiGateway}
+                    - SSMApiGateway: !ImportValue SSMApiGateway-cfn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  UpdateSSMParameterFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Runtime: python3.13
+      Role: !GetAtt SSMUpdateLambdaExecutionRole.Arn
+      Timeout: 10
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              ssm = boto3.client('ssm')
+              try:
+                  name = event['ResourceProperties']['Name']
+                  value = event['ResourceProperties']['Value']
+                  print(name, value)
+                  param_type = event['ResourceProperties'].get('Type', 'String')
+
+                  ssm.put_parameter(
+                      Name=name,
+                      Value=value,
+                      Type=param_type,
+                      Overwrite=True
+                  )
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print("Error:", e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  UpdateSSMAgentIdCustomResource:
+    Type: Custom::UpdateSSMParam
+    Properties:
+      ServiceToken: !GetAtt UpdateSSMParameterFunction.Arn
+      Name: !ImportValue SSMAgentIdName-cfn
+      Value: !ImportValue AssetTracker-BedrockAgentId-cfn
+      Type: String
+
+  UpdateSSMAgentAliasIdCustomResource:
+    Type: Custom::UpdateSSMParam
+    Properties:
+      ServiceToken: !GetAtt UpdateSSMParameterFunction.Arn
+      Name: !ImportValue SSMAgentAliasIdName-cfn
+      Value: !ImportValue AssetTracker-BedrockAgentAliasId-cfn
+      Type: String
+
+  UpdateSSMUserPoolIdCustomResource:
+    Type: Custom::UpdateSSMParam
+    Properties:
+      ServiceToken: !GetAtt UpdateSSMParameterFunction.Arn
+      Name: !ImportValue SSMUserPoolIdName-cfn
+      Value: !ImportValue AssetTracker-UserPoolId-cfn
+      Type: String
+
+  UpdateSSMApiGatewayCustomResource:
+    Type: Custom::UpdateSSMParam
+    Properties:
+      ServiceToken: !GetAtt UpdateSSMParameterFunction.Arn
+      Name: !ImportValue SSMApiGateway-cfn
+      Value: !Sub "https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${WebSocketStage}/"
+      Type: String
+
+  rEventBridgeInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - scheduler.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: InvokeLambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub 
+                  - "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${IDCLambda}"
+                  - IDCLambda: !ImportValue AssetTracker-IssueDeadlineCheckLambda-cfn
+
+  rEventBridgeScheduleIssueDeadlineCheck: 
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Description: "Daily check for issue deadlines"
+      FlexibleTimeWindow:
+        Mode: "OFF"
+      Name: !Sub "${pProjectName}-IssueDeadlineCheck-Schedule-cfn"
+      ScheduleExpression: "rate(1 day)"
+      State: "ENABLED"
+      Target:
+        Arn: !Sub 
+          - "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${IDCLambda}"
+          - IDCLambda: !ImportValue AssetTracker-IssueDeadlineCheckLambda-cfn
+        RoleArn: !GetAtt rEventBridgeInvokeRole.Arn
+      
+  SwaggerUpdaterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SwaggerUpdatePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                Resource: !Sub arn:aws:s3:::${SwaggerS3Bucket}/${SwaggerS3Key}
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  SwaggerUpdaterLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: AssetTracker-CustomSwaggerLambda
+      Handler: swagger_updater.lambda_handler
+      Role: !GetAtt SwaggerUpdaterRole.Arn
+      Runtime: python3.13
+      Code: 
+        S3Bucket: assettracker-s3-bucket
+        S3Key: swagger_updater.zip
+      Timeout: 300
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref SwaggerS3Bucket
+          SWAGGER_KEY: !Ref SwaggerS3Key
+          USER_POOL_ARN: !Sub 
+            - arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}
+            - UserPoolId: !ImportValue AssetTracker-UserPoolId-cfn
+
+  SwaggerUpdaterCustomResource:
+    Type: Custom::SwaggerUpdater
+    DependsOn: SwaggerUpdaterLambda
+    Properties:
+      ServiceToken: !GetAtt SwaggerUpdaterLambda.Arn
+      BucketName: !Ref SwaggerS3Bucket
+      Key: !Ref SwaggerS3Key
+      CognitoUserPoolArn: 
+        - !Sub 
+          - arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}
+          - UserPoolId: !ImportValue AssetTracker-UserPoolId-cfn
+
+  ApiGateway:
+    Type: AWS::ApiGateway::RestApi
+    DependsOn: SwaggerUpdaterCustomResource
+    Properties:
+      Name: AssetTrackerAPI
+      BodyS3Location:
+        Bucket: !Ref SwaggerS3Bucket
+        Key: !Ref SwaggerS3Key
+
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref ApiGateway
+      StageName: !Ref StageName
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: AssetTracker-WebSocket
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: "$request.body.action"
+
+  IntegrationAnalysis:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub
+        - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ChatLambda}/invocations
+        - ChatLambda: !ImportValue AssetTracker-ChatLambda-cfn
+      IntegrationMethod: POST
+      ConnectionType: INTERNET
+      PayloadFormatVersion: "1.0"
+      PassthroughBehavior: WHEN_NO_MATCH
+
+  IntegrationConnect:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ChatLambda}/invocations
+        - ChatLambda: !ImportValue AssetTracker-ChatLambda-cfn
+      IntegrationMethod: POST
+      ConnectionType: INTERNET
+      PayloadFormatVersion: "1.0"
+      
+      PassthroughBehavior: WHEN_NO_MATCH
+      
+  IntegrationDisconnect:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${ChatLambda}/invocations
+        - ChatLambda: !ImportValue AssetTracker-ChatLambda-cfn
+      IntegrationMethod: POST
+      ConnectionType: INTERNET
+      PayloadFormatVersion: "1.0"
+      
+      PassthroughBehavior: WHEN_NO_MATCH
+    
+  RouteConnect:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      AuthorizationType: NONE
+      Target: !Join [ "/", [ "integrations", !Ref IntegrationConnect ] ]
+
+  RouteDisconnect:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      Target: !Join [ "/", [ "integrations", !Ref IntegrationDisconnect ] ]
+
+  RouteAnalysis:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: analysis
+      AuthorizationType: NONE
+      Target: !Join [ "/", [ "integrations", !Ref IntegrationAnalysis ] ]
+
+  Deployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - RouteConnect
+      - RouteDisconnect
+      - RouteAnalysis
+    Properties:
+      ApiId: !Ref WebSocketApi
+      
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      StageName: prod
+      AutoDeploy: true
+      DeploymentId: !Ref Deployment
+      ApiId: !Ref WebSocketApi
+      DefaultRouteSettings:
+        DataTraceEnabled: false
+        DetailedMetricsEnabled: false
+        LoggingLevel: OFF
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue AssetTracker-ChatLambda-cfn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*"
+
+  LambdaIssuesInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue AssetTracker-IssuesLambda-cfn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:s3:::${S3FilesBucket}*"
+        - S3FilesBucket: !ImportValue AssetTracker-S3FilesBucket
+
+  LambdaAssetsInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:s3:::${S3FilesBucket}*"
+        - S3FilesBucket: !ImportValue AssetTracker-S3FilesBucket
+
+  SecondIAMPolicyCognitoFunctionsRole:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: AllowCognitoSSMAccess
+      RoleName: !ImportValue AssetTracker-IAMRoleLambdaCognitoFunctions-cfn
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: 
+              - cognito-idp:AdminGetUser
+              - cognito-idp:AdminUpdateUserAttributes
+            Resource:
+              - !Sub
+                - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+                - UserPoolId: !ImportValue AssetTracker-UserPoolId-cfn
+
+  SecondIAMPolicyUsersRole:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: AllowCognitoAccess
+      RoleName: !ImportValue AssetTracker-IAMRoleLambdaUsers-cfn
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - cognito-idp:AdminCreateUser
+              - cognito-idp:AdminUpdateUserAttributes
+              - cognito-idp:AdminDeleteUser
+            Resource:
+              - !Sub
+                - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+                - UserPoolId: !ImportValue AssetTracker-UserPoolId-cfn
+
+  SecondIAMPolicyAgenticRole:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !ImportValue AssetTracker-IAMRoleLambdaAgentic-cfn
+      PolicyName: AllowCognitoAccess
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - cognito-idp:AdminUpdateUserAttributes
+            Resource: !Sub
+              - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+              - UserPoolId: !ImportValue AssetTracker-UserPoolId-cfn
+
+  ThirdIAMPolicyAgenticRole:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      RoleName: !ImportValue AssetTracker-IAMRoleLambdaAgentic-cfn
+      PolicyName: AllowS3Access
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+              - s3:ListBucket
+            Resource: !Sub
+              - "arn:aws:s3:::${S3FilesBucket}*"
+              - S3FilesBucket: !ImportValue AssetTracker-S3FilesBucket
+
+
+  
+  SecondIAMPolicyChatRole:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: AllowAPIGWAccess
+      RoleName: !ImportValue AssetTracker-IAMRoleLambdaChat-cfn
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - execute-api:ManageConnections
+              - execute-api:Invoke
+            Resource: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/${WebSocketStage}/POST/@connections/*"
+                
+  SecondIAMPolicyAssetsRole:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: AllowS3Access
+      RoleName: !ImportValue AssetTracker-IAMRoleLambdaAssets-cfn
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Statement1
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:ListBucket'
+              - 's3:DeleteObject'
+            Resource: !Sub 
+              - 'arn:aws:s3:::${S3FilesBucket}*'
+              - S3FilesBucket: !ImportValue AssetTracker-S3FilesBucket
+          - Sid: Statement2
+            Effect: Allow
+            Action:
+              - 's3:GetObject'
+              - 's3:PutObject'
+              - 's3:ListBucket'
+              - 's3:DeleteObject'
+            Resource: !Sub 
+              - 'arn:aws:s3:::${S3ExpiredFilesBucket}*'
+              - S3ExpiredFilesBucket: !ImportValue AssetTracker-S3ExpiredFilesBucket
+
+  SecondIAMPolicyIssuesRole:
+    Type: AWS::IAM::RolePolicy
+    Properties:
+      PolicyName: AllowS3Access
+      RoleName: !ImportValue AssetTracker-IAMRoleLambdaIssues-cfn
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: VisualEditor0
+            Effect: Allow
+            Action:
+              - 's3:PutObject'
+              - 's3:GetObject'
+              - 's3:DeleteObject'
+            Resource: !Sub
+              - "arn:aws:s3:::${S3FilesBucket}/*"
+              - S3FilesBucket: !ImportValue AssetTracker-S3FilesBucket
+          - Sid: Statement1
+            Effect: Allow
+            Action:
+              - 's3:ListBucket'
+            Resource: !Sub
+              - "arn:aws:s3:::${S3FilesBucket}"
+              - S3FilesBucket: !ImportValue AssetTracker-S3FilesBucket
+
+  ApiPermissionGroupsLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-GroupsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/groups/*"
+
+  EBPermissionIDCLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-IssueDeadlineCheckLambda-cfn
+      Principal: scheduler.amazonaws.com
+      SourceArn: !GetAtt rEventBridgeScheduleIssueDeadlineCheck.Arn
+
+
+  ResBasedLambdaAssetsGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/assets"
+  ResBasedLambdaAssetsDelete:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/DELETE/assets/*"
+  ResBasedLambdaAssetsGetID:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/assets/*"
+  ResBasedLambdaAssetsPut:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/PUT/assets/*"
+  ResBasedLambdaAssetsPost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/assets"
+
+  ResBasedLambdaCommentsGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/comments/*"
+  ResBasedLambdaCommentsDelete:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/DELETE/comments/*"
+  ResBasedLambdaCommentsPut:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/PUT/comments/*"
+  ResBasedLambdaCommentsPost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/comments/*"    
+  ResBasedLambdaAssignedGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/assignment"
+  ResBasedLambdaAssignedPost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/assignment"
+  ResBasedLambdaAssignedGetID:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-AssetsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/assignment/*"
+
+  ResBasedLambdaIssuesGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-IssuesLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/issues"
+  ResBasedLambdaIssuesPost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-IssuesLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/issues"
+  ResBasedLambdaIssuesDelete:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-IssuesLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/DELETE/issues/*"
+  ResBasedLambdaIssuesPut:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-IssuesLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/PUT/issues/*"
+  ResBasedLambdaIssuesGetID:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-IssuesLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/issues/*"
+
+
+
+
+  ResBasedLambdaUserManagementPut:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-UsersLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/PUT/users/*"
+  ResBasedLambdaUserManagementGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-UsersLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/users"
+  ResBasedLambdaUserManagementPost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-UsersLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/users"
+  ResBasedLambdaUserManagementDelete:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-UsersLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/DELETE/users/*"
+  ResBasedLambdaUserManagementPatchRole:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-UsersLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/PATCH/users/role/*"
+  ResBasedLambdaUserManagementGetID:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-UsersLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/users/*"
+  ResBasedLambdaUserManagementGetSearchParam:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-UsersLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/users/searchParam"
+
+  ResBasedLambdaCognitoFunctions:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-CognitoFunctionsLambda-cfn
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !Sub
+        - "arn:aws:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/${UserPoolId}"
+        - UserPoolId: !ImportValue AssetTracker-UserPoolId-cfn
+
+  ResBasedLambdaChatPost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-ChatLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/chat"
+
+  ResBasedLambdaGroupsPost:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-GroupsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/POST/groups"
+  ResBasedLambdaGroupsDelete:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-GroupsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/DELETE/groups/*"
+  ResBasedLambdaGroupsPut:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-GroupsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/PUT/groups/*"
+  ResBasedLambdaGroupsGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-GroupsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/groups/*"
+  ResBasedLambdaGroupsGetID:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !ImportValue AssetTracker-GroupsLambda-cfn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/GET/groups"
+
+
+ 
+Outputs:
+  ApiEndpoint:
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod/"

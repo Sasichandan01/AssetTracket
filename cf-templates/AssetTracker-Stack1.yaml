@@ -1,0 +1,2610 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: AssetTracker
+  VpcCIDR:
+    Description: Please enter the IP range (CIDR notation) for this VPC
+    Type: String
+    Default: 10.34.0.0/16
+  PrivateSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the first Availability Zone
+    Type: String
+    Default: 10.34.0.0/18
+  PrivateSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the private subnet in the second Availability Zone
+    Type: String
+    Default: 10.34.64.0/18
+  PublicSubnet1CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the first Availability Zone
+    Type: String
+    Default: 10.34.128.0/18
+  PublicSubnet2CIDR:
+    Description: Please enter the IP range (CIDR notation) for the public subnet in the second Availability Zone
+    Type: String
+    Default: 10.34.192.0/18
+  LambdaLayerS3Key:
+    Type: String
+    Default: "AssetTracker-JWTLayer.zip"
+  LambdaAssetsS3Key:
+    Type: String
+    Description: Assets Lambda code zip in s3
+    Default: "AssetTracker-Assets.zip"
+  LambdaIssuesS3Key:
+    Type: String
+    Description: Issues Lambda code zip in s3
+    Default: "AssetTracker-Issues.zip"
+  LambdaUsersS3Key:
+    Type: String
+    Description: UserManagement Lambda code zip in s3
+    Default: "AssetTracker-UserManagement.zip"
+  LambdaCognitoFunctionsS3Key:
+    Type: String
+    Description: Pre Signup Lambda code zip in s3
+    Default: "AssetTracker-CognitoFunctions.zip"
+  LambdaChatS3Key:
+    Type: String
+    Description: Chat Lambda code zip in s3
+    Default: "AssetTracker-Chat.zip"
+  LambdaGroupsS3Key:
+    Type: String
+    Description: Groups Lambda code zip in s3
+    Default: "AssetTracker-Groups.zip"
+  LambdaS3Bucket:
+    Type: String
+    Description: The s3 bucket that contains all lambda code files
+    Default: "assettracker-s3-bucket"
+  pCodeS3Bucket:
+    Type: String
+    Default: assettracker-s3-bucket
+  pCodeFile:
+    Type: String
+    Default: AssetTracker-IssueDeadlineCheck.zip
+  pScheduleRate:
+    Type: String
+    Default: "rate(1 day)"
+  LambdaAgenticS3Key:
+    Type: String
+    Description: Agentic Lambda code zip in s3
+    Default: "AssetTracker-Agentic.zip"
+  CognitoEmailIdentity:
+    Type: String
+    Default: "noreply@cloudwick.com"
+  FilesS3Bucket:
+    Type: String
+    Default: "assettracker-s3-files"
+  ExpiredFilesS3Bucket:
+    Type: String
+    Default: "assettracker-s3-expiredfiles"
+
+
+Resources:  
+
+  AssetTrackerWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: AssetTracker-WAF-cfn
+      Scope: REGIONAL
+      DefaultAction:
+        Block: {}
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: AssetTracker-WAF
+      Rules:
+        - Name: AssetTracker-AllowSpecificIPs
+          Priority: 0
+          Action:
+            Allow: {}
+          Statement:
+            IPSetReferenceStatement:
+              ARN: !GetAtt AllowedIPs.Arn
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AssetTracker-AllowSpecificIPs
+
+        - Name: "AWS-AWSManagedRulesCommonRuleSet"
+          Priority: 1
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: "AWS-AWSManagedRulesCommonRuleSet"
+
+        - Name: "AWS-AWSManagedRulesKnownBadInputsRuleSet"
+          Priority: 2
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: "AWS-AWSManagedRulesKnownBadInputsRuleSet"
+
+        - Name: "AWS-AWSManagedRulesSQLiRuleSet"
+          Priority: 3
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: "AWS-AWSManagedRulesSQLiRuleSet"
+
+  AllowedIPs:
+    Type: AWS::WAFv2::IPSet
+    Properties:
+      Name: AssetTracker-AllowedIPs
+      Scope: REGIONAL
+      IPAddressVersion: IPV4
+      Addresses:
+        - 14.195.101.10/32  
+
+
+  S3FilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref FilesS3Bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Function: !GetAtt LambdaAssets.Arn
+            Event: "s3:ObjectCreated:Put"
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: assets/
+          - Function: !GetAtt LambdaIssues.Arn
+            Event: "s3:ObjectCreated:Put"
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: issues/
+                 
+             
+
+
+  S3ExpiredFilesBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref ExpiredFilesS3Bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: Delete after 2 years
+            Status: Enabled
+            ExpirationInDays: 731
+
+  SSMUserPoolId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Description: user pool id 
+      Name: AssetTracker-UserPool-Id-cfn
+      Type: String
+      Value: "${AWS::Region}_randomval"
+
+  SSMAgentId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Description: agent id
+      Name: AssetTracker-Agent-Id-cfn
+      Type: String
+      Value: "agent"
+
+  SSMAgentAliasId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Description: agent alias id
+      Name: AssetTracker-AgentAlias-Id-cfn
+      Type: String
+      Value: "agent-alias"
+  
+  SSMPiiMaps:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Description: agent alias id
+      Name: AssetTracker-PiiMaps
+      Type: String
+      Value: "agent-alias"    
+
+  SSMApiGateway:
+    Type: AWS::SSM::Parameter
+    Properties:
+      DataType: text
+      Description: api gateway domain
+      Name: AssetTracker-ApiGateway-Domain
+      Type: String
+      Value: "api-domain"
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      LambdaConfig:
+        PreSignUp: !GetAtt LambdaCognitoFunctions.Arn
+        PostConfirmation: !GetAtt LambdaCognitoFunctions.Arn
+        PostAuthentication: !GetAtt LambdaCognitoFunctions.Arn
+
+      AutoVerifiedAttributes:
+        - email
+      AliasAttributes:
+        - email
+      DeletionProtection: ACTIVE
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+        SignInPolicy:
+          AllowedFirstAuthFactors:
+            - PASSWORD
+            - EMAIL_OTP
+      Schema:
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Name: name
+          Required: true
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Name: phone_number
+          Required: true
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: false
+          Name: email
+          Required: true
+        - AttributeDataType: String
+          DeveloperOnlyAttribute: false
+          Mutable: true
+          Name: role
+          Required: false
+      UserPoolName: AssetTracker-Cognito-UserPool
+      EmailConfiguration:
+        EmailSendingAccount: DEVELOPER
+        From: !Ref CognitoEmailIdentity
+        SourceArn: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${CognitoEmailIdentity}
+      VerificationMessageTemplate:
+        DefaultEmailOption: CONFIRM_WITH_LINK
+        EmailMessage: 'Welcome to AssetTracker! Your verification code is: {####}. This code will expire in 24 hours.'
+        EmailMessageByLink: 'Welcome to AssetTracker! Choose this link to {##verify your email address##}.'
+        EmailSubject: 'AssetTracker - Verify Your Email'
+        EmailSubjectByLink: 'AssetTracker - Email Verification Link'
+        SmsMessage: 'AssetTracker verification code: {####}'
+      UserAttributeUpdateSettings:
+        AttributesRequireVerificationBeforeUpdate:
+          - email
+      UsernameConfiguration:
+        CaseSensitive: true
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      AccessTokenValidity: 60
+      IdTokenValidity: 60
+      RefreshTokenValidity: 30
+      AllowedOAuthFlows:
+        - code
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthScopes:
+        - email
+        - openid
+        - phone
+        - profile
+        - aws.cognito.signin.user.admin
+      CallbackURLs:
+        - http://localhost:3000/auth/callback
+      ClientName: AssetTracker-Cognito-UserPool-Client    
+      ExplicitAuthFlows:
+        - ALLOW_USER_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+      LogoutURLs:
+        - http://localhost:3000/auth/logout
+      SupportedIdentityProviders:
+        - COGNITO
+      TokenValidityUnits:
+        AccessToken: minutes
+        IdToken: minutes
+        RefreshToken: days
+      UserPoolId: !Ref UserPool
+
+  UserPoolDomain:
+    Type: AWS::Cognito::UserPoolDomain
+    Properties:
+      Domain: asset-tracker-login-app
+      UserPoolId: !Ref UserPool
+  
+  ManagerFlag:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Type: String
+      Name: AssetTracker-ManagerFlag
+      Tier: Standard
+      Value: "0"
+
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AssetTracker-Users-Table
+      AttributeDefinitions:
+        -
+          AttributeName: UserName
+          AttributeType: "S"
+        -
+          AttributeName: RoleName
+          AttributeType: "S"
+        -
+          AttributeName: Email
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: UserName
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      GlobalSecondaryIndexes:
+        -
+          IndexName: RoleName-index
+          KeySchema:
+            -
+              AttributeName: RoleName
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        -
+          IndexName: Email-index
+          KeySchema:
+            -
+              AttributeName: Email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: UserExpirationTime
+        Enabled: true
+
+  AssetsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:  AssetTracker-Assets-Table
+      AttributeDefinitions:
+        -
+          AttributeName: AssetId
+          AttributeType: "S"
+        -
+          AttributeName: SerialNumber
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: AssetId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      GlobalSecondaryIndexes:
+        -
+          IndexName: SerialNumber-index
+          KeySchema:
+            -
+              AttributeName: SerialNumber
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: AssetExpirationTime
+        Enabled: true
+
+  AssignmentTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:  AssetTracker-Assignment-Table
+      AttributeDefinitions:
+        -
+          AttributeName: AssetId
+          AttributeType: "S"
+        -
+          AttributeName: HolderId
+          AttributeType: "S"
+        -
+          AttributeName: AssignmentId
+          AttributeType: "S"
+        -
+          AttributeName: CreatedAt
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: AssignmentId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      GlobalSecondaryIndexes:
+        -
+          IndexName: AssetId-index
+          KeySchema:
+            -
+              AttributeName: AssetId
+              KeyType: HASH
+            -
+              AttributeName: CreatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        -
+          IndexName: HolderId-index
+          KeySchema:
+            -
+              AttributeName: HolderId
+              KeyType: HASH
+            -
+              AttributeName: CreatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: AssignmentExpirationTime
+        Enabled: true
+
+  IssuesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:  AssetTracker-Issues-Table
+      AttributeDefinitions:
+        -
+          AttributeName: IssueId
+          AttributeType: "S"
+        -
+          AttributeName: AssetId
+          AttributeType: "S"
+        -
+          AttributeName: IssueStatus
+          AttributeType: "S"
+        -
+          AttributeName: DeleteRequest
+          AttributeType: "S"
+        -
+          AttributeName: CreatedBy
+          AttributeType: "S"
+        -
+          AttributeName: Report
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: IssueId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      GlobalSecondaryIndexes:
+        -
+          IndexName: AssetId-CreatedBy-index
+          KeySchema:
+            -
+              AttributeName: AssetId
+              KeyType: HASH
+            -
+              AttributeName: CreatedBy
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        -
+          IndexName: IssueStatus-CreatedBy-index
+          KeySchema:
+            -
+              AttributeName: IssueStatus
+              KeyType: HASH
+            -
+              AttributeName: CreatedBy
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        -
+          IndexName: DeleteRequest-CreatedBy-index
+          KeySchema:
+            -
+              AttributeName: DeleteRequest
+              KeyType: HASH
+            -
+              AttributeName: CreatedBy
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        -
+          IndexName: Report-CreatedBy-index
+          KeySchema:
+            -
+              AttributeName: Report
+              KeyType: HASH
+            -
+              AttributeName: CreatedBy
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: IssueExpirationTime
+        Enabled: true
+
+  GroupsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:  AssetTracker-Groups-Table
+      AttributeDefinitions:
+        -
+          AttributeName: GroupId
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: GroupId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+
+  CommentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:  AssetTracker-Comments-Table
+      AttributeDefinitions:
+        -
+          AttributeName: CommentId
+          AttributeType: "S"
+        -
+          AttributeName: AssetId
+          AttributeType: "S"
+        -
+          AttributeName: CreatedAt
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: CommentId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      GlobalSecondaryIndexes:
+        -
+          IndexName: AssetId-index
+          KeySchema:
+            -
+              AttributeName: AssetId
+              KeyType: HASH
+            -
+              AttributeName: CreatedAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: CommentsExpirationTime
+        Enabled: true
+
+  AgentSessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AssetTracker-AgentSesions-Table
+      AttributeDefinitions:
+        -
+          AttributeName: ConnectionId
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: ConnectionId
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      
+  JWTLambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: AssetTracker-JWTLambdaLayer
+      Description: Shared layer for Lambda functions
+      Content:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaLayerS3Key
+      CompatibleRuntimes:
+        - python3.13
+      
+  LambdaAssets:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaAssetsS3Key
+      FunctionName: AssetTracker-Assets-Lambda
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt IAMRoleLambdaAssets.Arn
+      MemorySize: 128
+      Timeout: 10
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Environment:
+        Variables:
+          ASSIGNMENT_TABLE_NAME: !Ref AssignmentTable
+          GROUPS_TABLE_NAME: !Ref GroupsTable
+          USERS_TABLE_NAME: !Ref UsersTable
+          ISSUES_TABLE_NAME: !Ref IssuesTable
+          ASSETS_TABLE_NAME: !Ref AssetsTable
+          COMMENTS_TABLE_NAME: !Ref CommentsTable
+          S3_FILES_BUCKET: !Ref FilesS3Bucket
+          S3_EXPIRED_FILES_BUCKET: !Ref ExpiredFilesS3Bucket
+
+  LambdaUsers:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaUsersS3Key
+      FunctionName: AssetTracker-UserManagement-Lambda
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt IAMRoleLambdaUsers.Arn
+      MemorySize: 128
+      Timeout: 10
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Environment:
+        Variables:
+          ASSETS_TABLE_NAME: !Ref AssetsTable
+          ASSIGNMENT_TABLE_NAME: !Ref AssignmentTable
+          GROUPS_TABLE_NAME: !Ref GroupsTable
+          ISSUES_TABLE_NAME: !Ref IssuesTable
+          USER_POOL_ID: !Ref SSMUserPoolId
+          USERS_TABLE_NAME: !Ref UsersTable
+         
+  LambdaIssues:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaIssuesS3Key
+      FunctionName: AssetTracker-Issues-Lambda
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt IAMRoleLambdaIssues.Arn
+      MemorySize: 128
+      Timeout: 10
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Environment:
+        Variables:
+          ASSETS_TABLE_NAME: !Ref AssetsTable
+          ASSIGNMENT_TABLE_NAME: !Ref AssignmentTable
+          GROUPS_TABLE_NAME: !Ref GroupsTable
+          USERS_TABLE_NAME: !Ref UsersTable
+          ISSUES_TABLE_NAME: !Ref IssuesTable
+          S3_FILES_BUCKET: !Ref FilesS3Bucket
+          S3_EXPIRED_FILES_BUCKET: !Ref ExpiredFilesS3Bucket
+          
+  LambdaCognitoFunctions:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaCognitoFunctionsS3Key
+      FunctionName: AssetTracker-CognitoFunctions-Lambda
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt IAMRoleLambdaCognitoFunctions.Arn
+      MemorySize: 128
+      Timeout: 10
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Environment:
+        Variables:
+          USERS_TABLE_NAME: !Ref UsersTable
+          USER_POOL_ID: !Ref SSMUserPoolId
+          MANAGER_FLAG: !Ref ManagerFlag
+
+  LambdaChat:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaChatS3Key
+      FunctionName: AssetTracker-Chat-Lambda
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt IAMRoleLambdaChat.Arn
+      MemorySize: 128
+      Timeout: 29
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Layers:
+        - !Ref JWTLambdaLayer
+      Environment:
+        Variables:
+          AGENT_ALIAS_ID: !Ref SSMAgentAliasId
+          USERS_TABLE_NAME: !Ref UsersTable
+          AGENT_ID: !Ref SSMAgentId
+          AGENTSESSIONS_TABLE_NAME: !Ref AgentSessionsTable
+          USER_POOL_CLIENT: !Ref UserPoolClient
+          API_ENDPOINT_URL: !Ref SSMApiGateway
+          PII_MAPS: !Ref SSMPiiMaps
+          
+
+  LambdaGroups:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaGroupsS3Key
+      FunctionName: AssetTracker-Groups-Lambda
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt IAMRoleLambdaGroups.Arn
+      MemorySize: 128
+      Timeout: 29
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Environment:
+        Variables:
+          GROUPS_TABLE_NAME: !Ref GroupsTable
+          USERS_TABLE_NAME: !Ref UsersTable
+          ASSETS_TABLE_NAME: !Ref AssetsTable
+          ASSIGNMENT_TABLE_NAME: !Ref AssignmentTable
+
+  LambdaIssueDeadlineCheck:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${EnvironmentName}-IssueDeadlineCheck-Lambda
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt IAMRoleLambdaIssueDeadlineCheck.Arn
+      Code:
+        S3Bucket: !Ref pCodeS3Bucket
+        S3Key: !Ref pCodeFile 
+      Timeout: 10
+      MemorySize: 128
+      Runtime: python3.13
+      Architectures:
+        - x86_64
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+      Environment:
+        Variables:
+          ISSUES_TABLE_NAME: !Ref IssuesTable
+          ASSETS_TABLE_NAME: !Ref AssetsTable
+          USERS_TABLE_NAME: !Ref UsersTable
+
+  LambdaAgentic:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaAgenticS3Key
+      FunctionName: !Sub AssetTracker-Agentic-Lambda
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.13
+      Role: !GetAtt IAMRoleLambdaAgentic.Arn
+      MemorySize: 128
+      Timeout: 29
+      Environment:  
+        Variables:  
+          ASSETS_TABLE_NAME: !Ref AssetsTable
+          USERS_TABLE_NAME: !Ref UsersTable
+          ISSUES_TABLE_NAME: !Ref IssuesTable
+          GROUPS_TABLE_NAME: !Ref GroupsTable
+          ASSIGNMENT_TABLE_NAME: !Ref AssignmentTable
+          USER_POOL_ID: !Ref SSMUserPoolId
+          COMMENTS_TABLE_NAME: !Ref CommentsTable
+          EMAIL: !Ref CognitoEmailIdentity
+          PII_MAPS: !Ref SSMPiiMaps
+          S3_BUCKET_NAME: !Ref FilesS3Bucket
+      VpcConfig:
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+  
+  CognitoFunctionLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt LambdaCognitoFunctions.Arn
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+    
+  IAMRoleLambdaAssets:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowDDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                 
+                Resource: !GetAtt AssetsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  
+                Resource:
+                  - !GetAtt AssignmentTable.Arn
+                  - !Sub
+                    - "${AssignmentTable}/index/AssetId-index"
+                    -  AssignmentTable: !GetAtt AssignmentTable.Arn
+                  - !Sub
+                    - "${AssignmentTable}/index/HolderId-index"
+                    -  AssignmentTable: !GetAtt AssignmentTable.Arn
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource:
+                  - !Sub
+                    - "${GroupsTable}"
+                    -  GroupsTable: !GetAtt GroupsTable.Arn
+                  - !Sub
+                    - "${UsersTable}"
+                    -  UsersTable: !GetAtt UsersTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:DeleteItem
+                Resource: 
+                  - !GetAtt IssuesTable.Arn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  - !Sub
+                    - "${IssuesTable}/index/AssetId-CreatedBy-index"
+                    -  IssuesTable: !GetAtt IssuesTable.Arn
+              - Effect: Allow
+                Action: 
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt CommentsTable.Arn
+                  - !Sub
+                    - "${CommentsTable}/index/AssetId-index"
+                    -  CommentsTable: !GetAtt CommentsTable.Arn
+      
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+
+        
+  IAMRoleLambdaUsers:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowDDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt UsersTable.Arn
+                  - !Sub
+                    - "${UsersTable}/index/RoleName-index"
+                    -  UsersTable: !GetAtt UsersTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                Resource: 
+                  - !GetAtt UsersTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt AssignmentTable.Arn
+                  - !Sub
+                    - "${AssignmentTable}/index/HolderId-index"
+                    -  AssignmentTable: !GetAtt AssignmentTable.Arn
+              - Effect: Allow
+                Action: dynamodb:UpdateItem
+                Resource: 
+                  - !GetAtt AssetsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                Resource: !GetAtt GroupsTable.Arn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource: !Sub 
+                  - "${UsersTable}/index/Email-index"
+                  -  UsersTable: !GetAtt UsersTable.Arn
+
+        - PolicyName: AllowSSMAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+            - Effect: "Allow"
+              Action: "ssm:GetParameter"
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMUserPoolId}"
+
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+
+        - PolicyName: LambdaSESAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action: ses:VerifyEmailIdentity
+                Resource: "*"   
+  IAMRoleLambdaIssues:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowDDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: 
+                  - !GetAtt AssetsTable.Arn
+                  - !GetAtt UsersTable.Arn
+                  - !GetAtt GroupsTable.Arn
+              - Effect: Allow
+                Action: dynamodb:Query
+                Resource:
+                  - !Sub
+                    - "${UsersTable}/index/RoleName-index"
+                    -  UsersTable: !GetAtt UsersTable.Arn
+                  - !Sub
+                    - "${AssignmentTable}/index/AssetId-index"
+                    -  AssignmentTable: !GetAtt AssignmentTable.Arn
+                  - !Sub
+                    - "${IssuesTable}/index/AssetId-CreatedBy-index"
+                    -  IssuesTable: !GetAtt IssuesTable.Arn
+                  - !Sub
+                    - "${IssuesTable}/index/IssueStatus-CreatedBy-index"
+                    -  IssuesTable: !GetAtt IssuesTable.Arn
+                  - !Sub
+                    - "${IssuesTable}/index/DeleteRequest-CreatedBy-index"
+                    -  IssuesTable: !GetAtt IssuesTable.Arn
+                  - !Sub
+                    - "${IssuesTable}/index/Report-CreatedBy-index"
+                    -  IssuesTable: !GetAtt IssuesTable.Arn
+               
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                Resource:
+                  - !GetAtt IssuesTable.Arn
+
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt AssetsTable.Arn
+
+
+        - PolicyName: AllowSESAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - ses:ListVerifiedEmailAddresses
+                  - ses:SendEmail
+                Resource: "*"
+       
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+              
+  IAMRoleLambdaCognitoFunctions:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowDBAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:UpdateItem
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                Resource: 
+                  - !GetAtt UsersTable.Arn
+
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub
+                    - "${UsersTable}/index/Email-index"
+                    -  UsersTable: !GetAtt UsersTable.Arn
+
+        - PolicyName: AllowSSMAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                Resource: 
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ManagerFlag}"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMUserPoolId}"
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+        - PolicyName: AllowSESAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Statement1
+                Effect: Allow
+                Action: 'ses:VerifyEmailIdentity'
+                Resource: '*'
+
+  IAMRoleLambdaChat:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowBedrockAgentAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: bedrock:InvokeAgent
+                Resource: !Sub  "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*/*"
+        - PolicyName: AllowDDBAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !GetAtt UsersTable.Arn
+              - Effect: Allow
+                Action: 
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                Resource: !GetAtt AgentSessionsTable.Arn
+        - PolicyName: AllowSSMAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ssm:GetParameter
+                Resource: 
+                - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMAgentAliasId}"
+                - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMAgentId}"
+                - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMPiiMaps}"
+                - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMApiGateway}"
+       
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+        - PolicyName: ComprehendAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Statement1
+                Effect: Allow
+                Action: 'comprehend:DetectPiiEntities'
+                Resource: '*'
+
+  IAMRoleLambdaGroups:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowDDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: GroupsTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt GroupsTable.Arn
+                  - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${GroupsTable}/*
+
+              - Sid: AssetsTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt AssetsTable.Arn
+
+              - Sid: UsersTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:UpdateItem
+                Resource:
+                  - !GetAtt UsersTable.Arn
+
+              - Sid: AssignmentTableAccess
+                Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt AssignmentTable.Arn
+                  - !Sub
+                      - "${AssignmentTable}/index/AssetId-index"
+                      -  AssignmentTable: !GetAtt AssignmentTable.Arn
+                  - !Sub
+                      - "${AssignmentTable}/index/HolderId-index"
+                      -  AssignmentTable: !GetAtt AssignmentTable.Arn
+     
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+
+  IAMRoleLambdaIssueDeadlineCheck: 
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowDDBAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:Scan
+                Resource:
+                  - !GetAtt AssetsTable.Arn
+                  - !GetAtt IssuesTable.Arn 
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource:
+                  - !Sub
+                    - "${UsersTable}/index/RoleName-index"
+                    - UsersTable: !GetAtt UsersTable.Arn
+                  - !Sub
+                    - "${IssuesTable}/index/IssueStatus-CreatedBy-index"
+                    -  IssuesTable: !GetAtt IssuesTable.Arn
+        - PolicyName: AllowSESAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:ListVerifiedEmailAddresses
+                Resource: "*"
+       
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"
+
+  IAMRoleBedrockAgent:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - bedrock.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AmazonBedrockAgentBedrockFoundationModelPolicyProd
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource:
+                  - !Sub arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-5-sonnet-20240620-v1:0
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: "*"
+        
+  IAMRoleLambdaAgentic:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AllowDDbAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:Scan
+                  - dynamodb:GetItem
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  
+                Resource:
+                  - !GetAtt AssetsTable.Arn
+                  - !GetAtt AssignmentTable.Arn
+                  - !GetAtt UsersTable.Arn                
+                  - !GetAtt IssuesTable.Arn               
+                  - !GetAtt GroupsTable.Arn
+              - Effect: Allow
+                Action:
+                  - dynamodb:Query
+                Resource: 
+                  - !Sub
+                    - "${AssignmentTable}/index/AssetId-index"
+                    - AssignmentTable: !GetAtt AssignmentTable.Arn
+                  - !Sub
+                    - "${AssignmentTable}/index/HolderId-index"
+                    - AssignmentTable: !GetAtt AssignmentTable.Arn 
+                  - !Sub
+                    - "${UsersTable}/index/RoleName-index"
+                    - UsersTable: !GetAtt UsersTable.Arn
+              - Effect: Allow
+                Action: 
+                  - dynamodb:PutItem
+                  - dynamodb:GetItem
+                  - dynamodb:Scan
+                  - dynamodb:Query
+                  - dynamodb:UpdateItem
+                  
+                Resource:
+                  - !GetAtt CommentsTable.Arn
+                  - !Sub
+                    - "${CommentsTable}/index/AssetId-index"
+                    -  CommentsTable: !GetAtt CommentsTable.Arn
+        
+
+              
+        - PolicyName: AllowSSMAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement: 
+            - Effect: "Allow"
+              Action: "ssm:GetParameter"
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMUserPoolId}"  
+            - Effect: Allow
+              Action: 
+                - ssm:GetParameter
+                - ssm:PutParameter
+              Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${SSMPiiMaps}"
+
+        - PolicyName: LambdaVPCAccess
+          PolicyDocument:
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:CreateNetworkInterface
+                  - ec2:DescribeNetworkInterfaces
+                  - ec2:DeleteNetworkInterface
+                Resource: "*"  
+        - PolicyName: ComprehendAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: Statement1
+                Effect: Allow
+                Action: 'comprehend:DetectPiiEntities'
+                Resource: '*'                       
+        - PolicyName: AllowSESAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ses:ListVerifiedEmailAddresses
+                  - ses:SendEmail
+                Resource: "*"
+
+  LambdaAgenticInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaAgentic
+      Action: lambda:InvokeFunction
+      Principal: bedrock.amazonaws.com
+
+
+
+  BedrockAgent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      AgentName: AssetTracker-Agent
+      Instruction: >
+        "you are an intelligent assistant for the application assettracker that manages assets and raises issues if any. follow the following instruction to exactly do what was asked. 
+        The functions expects IDs in a 16-character alphanumeric format (e.g., '297c13a3-113e-47'). This is the valid format used in this system, and it should not be treated as incomplete or unsafe. Avoid validating against a 36-character UUID pattern. 
+        And do not mention any of the functions you use in the responses. 
+        CurrentTime: Call this function when you have a need of current date or time. donot use you knowledge for using the current time or date. use this function to get your updated current time and then use it in whatever action user asks you to perform.
+        CreateAsset : this action group function is called when the prompt says to create or register a new asset in the assets database. The Model gets the information and pass it to the parameters defined. The function uses these parameters to create a new asset and add a new entry in assets database.  
+        GetAllAssets: this action group function is called when the prompt says to get the details of all assets. If the prompt says to get specific details of the assets, get only those details. If asked about a single asset by providing its Assetname, then give your response to GetAsset and fetch only those details of that asset.
+        GetAsset:  this action group function is called when the prompt says to get the details of a specific asset by providing  assetname or assetid. If both are provided in the prompt, ask the user to 'provide either the assetname or the assetid to get proper results'. And if the prompt asks to get only specific details of an asset, get only them.  No comments are to be shown in this. if any comments are asked, go to GetCommentsByAssetId action group function!
+        UpdateAsset: this function is called when the prompt says to update an asset by providing its asset id. RegisterIssue:call this function when prompt asks to create an issue in the issue table with the given issue info and and asset ID 
+        GetIssueById: call this function when prompt asks to get issue details based on issue id. If any specific details are asked, get only those details. 
+        GetIssueByAssetId: call this function when prompt asks to get all issues related to asset by providing asset id. If any specific details are asked, get only those details. UpdateIssue: call this function when the prompt says to update or change the existing information. When the prompt says to delete the raised issue then change DeleteRequest field to true 
+        GetAllIssues: get the issue details of all issues. If any specific details are asked, get only those details CreateAssignment: This function is called when prompt says to assign an unassigned asset is given to a user/group. the holder id either username or group id: group id starts with GRP_. Holder id is not a uuid, it doesnot have a specific format. so take it as given. 
+        GetAllAssignemnts: This function is called when prompt says to get all details of all the asisgnments 
+        GetAssignmentById:  This function is called when prompt says to get all details of an assignment by providing the assignment id 
+        GetAssignmentByAssetId:  This function is called when prompt says to get all details of all assignments to an asset by providing the asset id GetAssignmentByHolderId: this function is called when prompt says to get details of all assignmnets of a user/group by providing the username/groupId. the holder id either username or group id: group id starts with GRP_. Holder id is not a uuid, it doesnot have a specific format. so take it as given. 
+        CreateUser: this is called when the prompt asks to add a new user to the database.  
+        UpdateUserDetails: this is called when prompt asks to update the details of user, email, phone number or name. 
+        GetAllUsers: this function is called when prompt says to get all details of all users. if specific details are asked, get only those details. 
+        GetUserById: this function is called when the prompt asks to get the user details by specifying the username.
+        UpdateGroup: this function is called when the prompt says to update or change an existing group. maybe change its name or add/remove a user to the group CreateGroup: this function is called when prompt says to create a new group with or without users in it.  
+        GetByGroupID: this function is called to get the details of a group by its groupId. If specific details are asked then provide only those details. GetAllGroups: this function is called when prompt asks to get all details of all groups. If specific details are asked then provide only those details.
+        GetCommentsByCommentId?: This function is called when prompt says to get details of a comment on asset by providing the commentId
+        GetCommentsByAssetId?: This function is called when prompt says to get comments made on an asset by providing the AssetId. Donot go to GetAsset function.
+        CreateComments?: This function is called when prompt says to add a comment under an asset by providing its asset id
+        UpdateComments?:  This function is called when prompt says to update a comment under an asset by providing its comment id
+        ReportAsset?:  This function is called when prompt says to report a Missing/Stolen asset instead f raising it as an issue by providing it as an asset id 
+        Donot mention anywhere in the response that the information is being masked or hidden for privacy. Jusst give the response as it is with masked values if there are any as if they are the riginal values. i will unmask them later! Strictly donot mention in the final response that there are masked values but you can show the masked values to user!
+        And if there is any information is masked like [REDACTED] in your reasoning. just update it with any relevant word.
+        If you are using multiple action group functions, make a relevant prompt for the next action group function and then send it.
+        always follow PascalCase (example, HelloWorld) for any string like asset status or issue status or etc."
+      AgentResourceRoleArn: !GetAtt IAMRoleBedrockAgent.Arn
+      FoundationModel: anthropic.claude-3-5-sonnet-20240620-v1:0
+      AutoPrepare: true
+      
+      ActionGroups:
+        - ActionGroupName: asset_actions
+          Description: This action group is used to perform all actions related to assets.
+          ActionGroupExecutor:
+            Lambda: !GetAtt LambdaAgentic.Arn
+          FunctionSchema:
+            Functions:
+
+              - Name: CreateAsset
+                Description: >
+                  This function creates an asset based on the parameters provided and adds them
+                  to the assets database. Determines the type (physical/digital) based on
+                  category. Takes SerialNumber and ServiceTime only if it is a physical asset.
+                  Takes Expiry only if it is a digital asset. Any extra important information
+                  provided is added to metadata.
+
+                Parameters:
+                  Type:
+                    Description: >
+                      The type of the asset physical or digital type of asset. If not provided,
+                      determines the type of asset based on the category.
+                    Required: false
+                    Type: string
+
+                  Category:
+                    Description: >
+                      Category the asset belongs to (laptops, monitors, chargers etc for physical
+                      assets and ApiKeys, etc for digital assets).
+                    Required: true
+                    Type: string
+
+                  SerialNumber:
+                    Description: >
+                      A number associated with a physical asset which is required, not for a
+                      digital asset.
+                    Required: false
+                    Type: string
+
+                  Metadata:
+                    Description: >
+                      The JSON format of any extra data provided for the asset like Model, OS,
+                      etc. Each of this is added as a key in the metadata object in string format.
+                    Required: false
+                    Type: string
+
+                  ServiceTime:
+                    Description: >
+                      Service time of a physical asset. This is required for physical assets,
+                      not digital assets.
+                    Required: false
+                    Type: string
+
+                  Cost:
+                    Description: Cost of the asset.
+                    Required: true
+                    Type: string
+
+                  AssetName:
+                    Description: Name of the asset to be created.
+                    Required: true
+                    Type: string
+
+                  Expiry:
+                    Description: >
+                      Expiry time of a digital asset. This is required for digital assets, not
+                      physical assets.
+                    Required: false
+                    Type: string
+
+                  Location:
+                    Description: >
+                      Location of the asset. Maybe in office or out-of-office. Maintain it in
+                      dictionary format like this {"InOffice/OutOfOffice":{"Address":str,
+                      "Date":time}}
+                    Required: false
+                    Type: string
+
+                RequireConfirmation: DISABLED
+
+              - Name: GetAllAssets
+                Description: >
+                  This action group function gets the details of all assets. If any specific
+                  details are asked, adds them to the `specifics` parameter separated by commas
+                  in PascalCase.
+
+                Parameters:
+                  Specifics:
+                    Description: >
+                      If any specific details are asked from all the assets for analysing.
+                    Required: false
+                    Type: string
+
+                RequireConfirmation: DISABLED
+
+              - Name: GetAsset
+                Description: >
+                  This gets the details of an asset by either AssetName or AssetId. If both are
+                  provided in the prompt, it asks the user to "provide either the assetname or
+                  the assetid to get proper results". If the prompt asks to get only specific
+                  details of an asset, get only them.
+
+                Parameters:
+                  AssetId:
+                    Description: >
+                      ID of the asset that the user wants to find out about. It has UUID in regex:
+                      [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
+                    Required: false
+                    Type: string
+                  AssetName:
+                    Description: Name of the asset that the user wants to find out about.
+                    Required: false
+                    Type: string
+
+                RequireConfirmation: DISABLED
+
+              - Name: UpdateAsset
+                Description: Updates the details of an asset when the assetId is provided
+
+                Parameters:
+                  Metadata:
+                    Description: Metadata can be modified or extra details can be added to the metadata dictionary
+                    Required: false
+                    Type: string
+                  ServiceTime:
+                    Description: ServiceTime of a physical asset can be modified
+                    Required: false
+                    Type: string
+                  Location:
+                    Description: >
+                      location of the asset. maybe in office or outofoffice. maintain it in
+                      dictionary format like this {"InOffice/OutOfOffice":{"Address":str, "Date":time}}
+                    Required: false
+                    Type: string
+                  AssetId:
+                    Description: ID of the asset to change its details
+                    Required: true
+                    Type: string
+                  Cost:
+                    Description: Cost of the asset can be changed
+                    Required: false
+                    Type: string
+                  AssetName:
+                    Description: Name of the asset can be changed
+                    Required: false
+                    Type: string
+                  Expiry:
+                    Description: Expiry time of a digital asset can be modified
+                    Required: false
+                    Type: string
+
+                RequireConfirmation: DISABLED
+
+              - Name: ReportAsset
+                Description: this function reports a Missing or Stolen Asset
+
+                Parameters:
+                  AssetId:
+                    Description: asset id of the asset that is to be reported in issues as Missing or Stolen
+                    Required: true
+                    Type: string
+
+                RequireConfirmation: DISABLED
+
+        - ActionGroupName: assignment_actions
+          Description: it has all the functions related to assigning an asset to a user
+          ActionGroupExecutor:
+            Lambda: !GetAtt LambdaAgentic.Arn
+          FunctionSchema:
+            Functions:
+
+              - Name: CreateAssignment
+                Description: This function assigns an unassigned asset to a user.
+                Parameters:
+                  HolderId:
+                    Description: The ID of the user or group to whom the asset is assigned.
+                    Required: true
+                    Type: string
+                  AssetId:
+                    Description: The ID of the asset which is to be assigned to a user.
+                    Required: true
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetAllAssignments
+                Description: Get all details of all the asset assignments done to users or groups.
+                Parameters: {}
+                RequireConfirmation: DISABLED
+
+              - Name: GetAssignmentById
+                Description: Get the details of one particular assignment by its assignment ID.
+                Parameters:
+                  AssignmentId:
+                    Description: ID of the asset assignment done to a user/group.
+                    Required: true
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetAssignmentByAssetId
+                Description: Get the details of all the assignments done to an asset.
+                Parameters:
+                  AssetId:
+                    Description: ID of the asset whose assignment details will be fetched.
+                    Required: true
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetAssignmentByHolderId
+                Description: This gets all the details of assignments of a user/group by mentioning the HolderId.
+                Parameters:
+                  HolderId:
+                    Description: ID of the user or group whose assignments are to be fetched.
+                    Required: true
+                    Type: string
+                RequireConfirmation: DISABLED
+
+        - ActionGroupName: issue_actions
+          Description: It deals with all the functions related to the issues
+          ActionGroupExecutor:
+            Lambda: !GetAtt LambdaAgentic.Arn
+          FunctionSchema:
+            Functions:
+
+              - Name: RegisterIssue
+                Description: This creates a new issue in the issues database for an asset.
+                Parameters:
+                  IssueDescription:
+                    Description: Max 2-line description of the issue being faced.
+                    Required: true
+                    Type: string
+                  AssetId:
+                    Description: >
+                      ID of the asset that is facing issues. It must match UUID regex: 
+                      [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}.
+                    Required: true
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: UpdateIssue
+                Description: Updates the details of the issue
+                Parameters:
+                  IssueDescription:
+                    Description: Description of the issue
+                    Required: false
+                    Type: string
+                  IssuePriority:
+                    Description: The priority of the issue (low, medium, urgent)
+                    Required: false
+                    Type: string
+                  IssueId:
+                    Description: ID of the issue to be updated
+                    Required: false
+                    Type: string
+                  DeleteRequest:
+                    Description: Set to true to delete the issue, otherwise false
+                    Required: false
+                    Type: boolean
+                  Notes:
+                    Description: Notes related to changes in issue status
+                    Required: false
+                    Type: string
+                  IssueStatus:
+                    Description: Status of the issue (Pending/In progress/Resolved)
+                    Required: false
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetIssuebyID
+                Description: Get the details of an issue based on its ID. If the prompt asks for specific details, it gets only those.
+                Parameters:
+                  IssueId:
+                    Description: Issue ID of the issue raised on an asset.
+                    Required: true
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetIssueByAssetId
+                Description: Gets all the issues related to an asset. If specific details are requested in the prompt, it gets only those.
+                Parameters:
+                  AssetId:
+                    Description: Asset ID of the asset to find the issues related to it.
+                    Required: true
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetAllIssues
+                Description: Gets all the information related to all the issues. If the prompt asks for specific details, it gets only those.
+                Parameters: {}
+                RequireConfirmation: DISABLED
+
+        - ActionGroupName: group_actions
+          Description: Handles all group-related operations including creation, retrieval, and updates
+          ActionGroupExecutor:
+            Lambda: !GetAtt LambdaAgentic.Arn
+          FunctionSchema:
+            Functions:
+              - Name: CreateGroup
+                Description: >
+                  Adds an entry in the groups table. It adds users if specified.
+                Parameters:
+                  GroupName:
+                    Description: Name of the group to be created
+                    Required: "True"
+                    Type: string
+                  Type:
+                    Description: >
+                      Type of the group. Set to 'Team' if it is a team. 
+                      A team lead would be associated and also included in Users.
+                    Required: "False"
+                    Type: string
+                  Lead:
+                    Description: >
+                      Username of the user who is the lead of the group (applicable if the group is of type 'Team')
+                    Required: "False"
+                    Type: string
+                  Users:
+                    Description: >
+                      Comma-separated list of usernames to be added to the group.
+                      Example: "user1,user2,user3"
+                    Required: "False"
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetByGroupID
+                Description: >
+                  Gets the details of the group with the mentioned group ID.
+                Parameters:
+                  GroupId:
+                    Description: ID of the group to fetch its details (UUID format)
+                    Required: "True"
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetAllGroups
+                Description: >
+                  Gets the details of all groups. Returns specific fields if requested.
+                Parameters: {}
+                RequireConfirmation: DISABLED
+
+              - Name: UpdateGroup
+                Description: >
+                  Updates the details of the group including adding or removing users.
+                Parameters:
+                  Add:
+                    Description: Set to true to add users, false to remove users from the group.
+                    Required: "True"
+                    Type: boolean
+                  Type:
+                    Description: >
+                      Type of the group. Set to 'Team' to update the group as a team. 
+                      A team lead will be assigned.
+                    Required: "False"
+                    Type: string
+                  Lead:
+                    Description: >
+                      Username of the user who is the lead of the group (for groups of type 'Team')
+                    Required: "False"
+                    Type: string
+                  Users:
+                    Description: >
+                      Comma-separated list of usernames to be added or removed.
+                      Example: "user1,user2,user3"
+                    Required: "True"
+                    Type: string
+                  GroupId:
+                    Description: ID of the group to which changes are to be made
+                    Required: "True"
+                    Type: string
+                RequireConfirmation: DISABLED
+
+        - ActionGroupName: user_actions
+          Description: Handles all user-related operations
+          ActionGroupExecutor:
+            Lambda: !GetAtt LambdaAgentic.Arn
+          FunctionSchema:
+            Functions:
+              - Name: UpdateUserDetails
+                Description: Updates the user details
+                Parameters:
+                  Email:
+                    Description: Email of the user that should be unique
+                    Required: false
+                    Type: string
+                  UserName:
+                    Description: Username of the user to be updated
+                    Required: true
+                    Type: string
+                  Phone:
+                    Description: Contact number of the user to be updated
+                    Required: false
+                    Type: string
+                  Name:
+                    Description: Name of the user (not username)
+                    Required: false
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetAllUsers
+                Description: Gets all the details of all the users
+                Parameters: {}
+                RequireConfirmation: DISABLED
+
+              - Name: GetUserById
+                Description: Gets the details of the user by its username
+                Parameters:
+                  UserName:
+                    Description: Username of the user to fetch details
+                    Required: false
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetUserDetailsByRole
+                Description: Gets details of all users associated with one role
+                Parameters:
+                  RoleName:
+                    Description: Role associated to users to filter the users table
+                    Required: true
+                    Type: string
+                RequireConfirmation: DISABLED
+
+        - ActionGroupName: comment_actions
+          Description: Handles all comment-related operations on assets including creation, retrieval, and updates
+          ActionGroupExecutor:
+            Lambda: !GetAtt LambdaAgentic.Arn
+          FunctionSchema:
+            Functions:
+              - Name: CreateComments
+                Description: >
+                  This action group function helps in creating a comment for a particular asset (AssetId) and user. Also provides a comment on the asset.
+                Parameters:
+                  Comment:
+                    Description: Comment/description on asset (AssetId)
+                    Required: "True"
+                    Type: string
+                  AssetId:
+                    Description: Unique identifier of an asset which has comment
+                    Required: "True"
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: UpdateComments
+                Description: >
+                  This action group function helps in updating the comment description of a particular comment using CommentId.
+                Parameters:
+                  Comment:
+                    Description: Updated comment/description of the mentioned CommentId
+                    Required: "True"
+                    Type: string
+                  CommentId:
+                    Description: ID of the comment which is being updated
+                    Required: "True"
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetCommentsByCommentId
+                Description: >
+                  This action group function helps in fetching the comment details by CommentId.
+                Parameters:
+                  CommentId:
+                    Description: Unique identifier of a comment that the user wants details about
+                    Required: "True"
+                    Type: string
+                RequireConfirmation: DISABLED
+
+              - Name: GetCommentsByAssetId
+                Description: >
+                  This action group function helps in fetching all comments of an asset using AssetId.
+                Parameters:
+                  AssetId:
+                    Description: Unique identifier of an asset that the user wants comment details about
+                    Required: "True"
+                    Type: string
+                RequireConfirmation: DISABLED
+
+        - ActionGroupName: current
+          Description: This action group updates the agent with the current time and date 
+          ActionGroupExecutor:
+            Lambda: !GetAtt LambdaAgentic.Arn
+          FunctionSchema:
+            Functions:
+              - Name: CurrentTime
+                Description: >
+                  This function returns the current date and time.
+                Parameters: {}
+                RequireConfirmation: DISABLED
+
+  AgentAliasResource:
+    Type: AWS::Bedrock::AgentAlias
+    Properties:
+      AgentId: !GetAtt BedrockAgent.AgentId
+      AgentAliasName: "AgentAlias"
+      Description: "Alias for testing"
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-IGW
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1a
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private Subnet-(AZ1)
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1b
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Private Subnet-(AZ2)
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1a
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Public Subnet-(AZ1)
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-east-1b
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-Public Subnet-(AZ2)
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-NATGW
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Public Routes
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName} Private Routes (AZ1)
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  PublicNACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: -public-nacl
+
+  PrivateNACL:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: -private-nacl
+
+  PrivateNACLInboundHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 443
+        To: 443
+
+  PublicNACLInboundAll:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicNACL
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+
+  PublicNACLOutboundAll:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PublicNACL
+      RuleNumber: 100
+      Protocol: -1
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+
+  PrivateNAtCLInboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: false
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535
+
+  PrivateNACLOutboundHTTPS:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNACL
+      RuleNumber: 100
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 443
+        To: 443
+ 
+  PrivateNACLOutboundEphemeral:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      NetworkAclId: !Ref PrivateNACL
+      RuleNumber: 110
+      Protocol: 6
+      RuleAction: allow
+      Egress: true
+      CidrBlock: 0.0.0.0/0
+      PortRange:
+        From: 1024
+        To: 65535
+        
+  AssociatePrivateNACLSubnet1:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      NetworkAclId: !Ref PrivateNACL
+
+  AssociatePrivateNACLSubnet2:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      NetworkAclId: !Ref PrivateNACL
+
+  AssociatePublicNACLSubnet1:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      NetworkAclId: !Ref PublicNACL
+
+  AssociatePublicNACLSubnet2:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      NetworkAclId: !Ref PublicNACL
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for VPC Lambdas
+      GroupName: AssetTrackerLambdaSG
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0 
+      Tags: 
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-LmabdaSG
+      VpcId: !Ref VPC
+
+  EndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for VPC Endpoints
+      GroupName: AssetTrackerEndpointSG
+      SecurityGroupEgress: 
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 0
+          CidrIp: 0.0.0.0/0 
+      SecurityGroupIngress: 
+        - IpProtocol: -1
+          FromPort: 0
+          ToPort: 0
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      Tags: 
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-EndpointSG
+      VpcId: !Ref VPC
+
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-S3Enpoint
+
+  DynamoDBEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      RouteTableIds:
+        - !Ref PrivateRouteTable
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcEndpointType: Gateway
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-DynamoDBEndpoint
+
+  SESEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.email-smtp
+      VpcEndpointType: Interface
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds: 
+        - !Ref EndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-SESEndpoint
+  
+  BedrockAgentRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.bedrock-agent-runtime
+      VpcEndpointType: Interface
+      SubnetIds: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroupIds: 
+        - !Ref EndpointSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-BedrockAgentRuntimeEndpoint
+
+
+Outputs:
+
+  WebAcl:
+    Value: !GetAtt AssetTrackerWebACL.Arn
+    Export:
+      Name: AssetTrackerWebACL-cfn
+
+  S3FilesBucket:
+    Value: !Ref FilesS3Bucket
+    Export:
+      Name: AssetTracker-S3FilesBucket
+
+  S3FilesExpiredBucket:
+    Value: !Ref ExpiredFilesS3Bucket
+    Export:
+      Name: AssetTracker-S3ExpiredFilesBucket
+
+  SSMUserPoolIdName:
+    Description: Export SSM User Pool ID Parameter Name
+    Value: !Ref SSMUserPoolId
+    Export:
+      Name: SSMUserPoolIdName-cfn
+
+  SSMAgentIdName:
+    Description: Export SSM Agent ID Parameter Name
+    Value: !Ref SSMAgentId
+    Export:
+      Name: SSMAgentIdName-cfn
+
+  SSMAgentAliasIdName:
+    Description: Export SSM Agent Alias ID Parameter Name
+    Value: !Ref SSMAgentAliasId
+    Export:
+      Name: SSMAgentAliasIdName-cfn
+
+  SSMApiGatewayName:
+    Description: Export SSM API Gateway Domain Parameter Name
+    Value: !Ref SSMApiGateway
+    Export:
+      Name: SSMApiGateway-cfn
+
+  UserPoolId:
+    Description: ID of the Cognito User Pool
+    Value: !Ref UserPool
+    Export:
+      Name:  AssetTracker-UserPoolId-cfn
+  UserPoolClientId:
+    Description: ID of the Cognito User Pool Client
+    Value: !Ref UserPoolClient
+    Export:
+      Name: AssetTracker-UserPoolClientId-cfn
+  BedrockAgentId:
+    Value: !GetAtt BedrockAgent.AgentId
+    Export:
+      Name: AssetTracker-BedrockAgentId-cfn
+
+  BedRockAgentAliasId:
+    Value: !Ref AgentAliasResource
+    Export:
+      Name: AssetTracker-BedrockAgentAliasId-cfn
+
+  LambdaAssets:
+    Description: Name of the Assets Lambda function
+    Value: !Ref LambdaAssets
+    Export:
+      Name: AssetTracker-AssetsLambda-cfn
+
+  LambdaUsers:
+    Description: Name of the Users Lambda function
+    Value: !Ref LambdaUsers
+    Export:
+      Name: AssetTracker-UsersLambda-cfn
+
+  LambdaIssues:
+    Description: Name of the Issues Lambda function
+    Value: !Ref LambdaIssues
+    Export:
+      Name: AssetTracker-IssuesLambda-cfn
+
+  LambdaCognitoFunctions:
+    Description: Name of the Cognito Lambda function
+    Value: !Ref LambdaCognitoFunctions
+    Export:
+      Name: AssetTracker-CognitoFunctionsLambda-cfn
+
+  LambdaChat:
+    Description: Name of the Chat Lambda function
+    Value: !Ref LambdaChat
+    Export:
+      Name: AssetTracker-ChatLambda-cfn
+
+  LambdaGroups:
+    Description: Name of the Groups Lambda function
+    Value: !Ref LambdaGroups
+    Export:
+      Name: AssetTracker-GroupsLambda-cfn
+
+  LambdaIssueDeadlineCheck:
+    Description: Name of the Issue Deadline Check Lambda function
+    Value: !Ref LambdaIssueDeadlineCheck
+    Export:
+      Name: AssetTracker-IssueDeadlineCheckLambda-cfn
+
+  LambdaAgentic:
+    Description: Name of the Agentic Lambda function
+    Value: !Ref LambdaAgentic
+    Export:
+      Name: AssetTracker-AgenticLambda-cfn
+
+  IAMRoleLambdaUsers:
+    Description: ARN of the Lambda Users IAM Role
+    Value: !Ref IAMRoleLambdaUsers
+    Export:
+      Name: AssetTracker-IAMRoleLambdaUsers-cfn
+
+  IAMRoleLambdaIssues:
+    Description: Name of the Lambda Issues IAM Role
+    Value: !Ref IAMRoleLambdaIssues
+    Export:
+      Name: AssetTracker-IAMRoleLambdaIssues-cfn
+  
+  IAMRoleLambdaAssets:
+    Description: Name of the Lambda Assets IAM Role
+    Value: !Ref IAMRoleLambdaAssets
+    Export:
+      Name: AssetTracker-IAMRoleLambdaAssets-cfn
+
+  IAMRoleLambdaGroups:
+    Description: Name of the Lambda Groups IAM Role
+    Value: !Ref IAMRoleLambdaGroups
+    Export:
+      Name: AssetTracker-IAMRoleLambdaGroups-cfn
+
+  IAMRoleLambdaCognitoFunctions:
+    Description: Name of the Lambda Cognito Functions IAM Role
+    Value: !Ref IAMRoleLambdaCognitoFunctions
+    Export:
+      Name: AssetTracker-IAMRoleLambdaCognitoFunctions-cfn
+
+  IAMRoleLambdaChat:
+    Description: Name of the Lambda Chat IAM Role
+    Value: !Ref IAMRoleLambdaChat
+    Export:
+      Name: AssetTracker-IAMRoleLambdaChat-cfn
+
+  IAMRoleLambdaIssueDeadlineCheck:
+    Description: Name of the Lambda Issue Deadline Check IAM Role
+    Value: !Ref IAMRoleLambdaIssueDeadlineCheck
+    Export:
+      Name: AssetTracker-IAMRoleLambdaIssueDeadlineCheck-cfn
+
+  IAMRoleLambdaAgenticArn:
+    Description: Name of the Lambda Agentic IAM Role
+    Value: !Ref IAMRoleLambdaAgentic
+    Export:
+      Name: AssetTracker-IAMRoleLambdaAgentic-cfn
+
+  IAMRoleBedrockAgent:
+    Description: Name of the Bedrock Agent IAM Role
+    Value: !Ref IAMRoleBedrockAgent
+    Export:
+      Name: AssetTracker-IAMRoleBedrockAgent-cfn
+
+  CognitoFunctionLambdaPermissionExport:
+    Description: Name of the CognitoFunction Lambda Permission
+    Value: !Ref CognitoFunctionLambdaPermission
+    Export:
+      Name: AssetTracker-CognitoFunctionLambdaPermission-cfn
+ 
+  LambdaAgenticInvokePermissionExport:
+    Description: Name of the Lambda Agentic Invoke Permission
+    Value: !Ref LambdaAgenticInvokePermission
+    Export:
+      Name: AssetTracker-LambdaAgenticInvokePermission-cfn
+
+  ManagerFlagParameter:
+    Description: Name of the Manager Flag SSM Parameter
+    Value: !Ref ManagerFlag
+    Export:
+      Name: AssetTracker-ManagerFlagParameter-cfn
+
+  VPC:
+    Description: A reference to the created VPC
+    Value: !Ref VPC
+   
+
+  PublicSubnets:
+    Description: A list of the public subnets
+    Value: !Join [ ",", [ !Ref PublicSubnet1, !Ref PublicSubnet2 ]]
+
+  PrivateSubnets:
+    Description: A list of the private subnets
+    Value: !Join [ ",", [ !Ref PrivateSubnet1, !Ref PrivateSubnet2 ]]
+
+  PublicSubnet1:
+    Description: A reference to the public subnet in the 1st Availability Zone
+    Value: !Ref PublicSubnet1
+
+  PublicSubnet2:
+    Description: A reference to the public subnet in the 2nd Availability Zone
+    Value: !Ref PublicSubnet2
+
+  PrivateSubnet1:
+    Description: A reference to the private subnet in the 1st Availability Zone
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2:
+    Description: A reference to the private subnet in the 2nd Availability Zone
+    Value: !Ref PrivateSubnet2
